@@ -185,8 +185,8 @@ prepare_cache(){
   while ! curl --fail --head http://localhost/images/ironic-python-agent.tar.headers ; do sleep 1; done
   while ! curl --fail --head http://localhost/images/ironic-python-agent.kernel ; do sleep 1; done
 
-  sed -i -e '/baremetal:/a \ \ \ \ \ \ clusterOSImage: ${CACHE_URL}/${MACHINE_OS_IMAGE_NAME}?sha256=${MACHINE_OS_IMAGE_SHA256}'
-  sed -i -e '/baremetal:/a \ \ \ \ \ \ bootstrapOSImage: ${CACHE_URL}/${MACHINE_OS_BOOTSTRAP_IMAGE_NAME}?sha256=${MACHINE_OS_BOOTSTRAP_IMAGE_UNCOMPRESSED_SHA256}'
+  sed -i -e '/^  baremetal:/a \ \ \ \ clusterOSImage: ${CACHE_URL}/${MACHINE_OS_IMAGE_NAME}?sha256=${MACHINE_OS_IMAGE_SHA256}'
+  sed -i -e '/^  baremetal:/a \ \ \ \ bootstrapOSImage: ${CACHE_URL}/${MACHINE_OS_BOOTSTRAP_IMAGE_NAME}?sha256=${MACHINE_OS_BOOTSTRAP_IMAGE_UNCOMPRESSED_SHA256}'
 }
 
 setup_env(){
