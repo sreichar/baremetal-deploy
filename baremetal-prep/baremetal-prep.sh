@@ -53,7 +53,6 @@ setup_repository(){
     sudo podman stop ocpdiscon-registry
     sudo podman rm ocpdiscon-registry
   fi
-  sudo yum -y install podman httpd httpd-tools
   sudo mkdir -p /opt/registry/{auth,certs,data}
   sudo openssl req -newkey rsa:4096 -nodes -sha256 -keyout /opt/registry/certs/domain.key -x509 -days 365 -out /opt/registry/certs/domain.crt -subj "/C=US/ST=Massachussetts/L=Boston/O=Red Hat/OU=Engineering/CN=$HOST_FQDN"
   sudo cp /opt/registry/certs/domain.crt $HOME/domain.crt
@@ -232,7 +231,12 @@ setup_bridges(){
 
 install_depends(){
   echo "Installing required dependencies..."
-  sudo yum -y install ansible git usbredir golang libXv virt-install libvirt libvirt-devel libselinux-utils qemu-kvm mkisofs python3-devel jq ipmitool
+  PKGS="ansible git usbredir golang libXv virt-install libvirt libvirt-devel libselinux-utils qemu-kvm mkisofs python3-devel jq ipmitool podman"
+  DISCONN_PKGS="httpd httpd-tools"
+  if ([ "$ENABLEDISCONNECT" -eq "1" ]) then
+    PKGS="${PKGS} ${DISCONN_PKGS}" 
+  fi
+  sudo yum -y install ${PKGS} 
 }
 
 enable_services(){
