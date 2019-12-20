@@ -116,6 +116,80 @@ find_sshkey_file(){
 
 }
 
+prepare_cache(){
+  WORKING_DIR=${WORKING_DIR:-"/opt/dev-scripts"}
+  export IRONIC_IMAGE="quay.io/metal3-io/ironic:master"
+  export IRONIC_IPA_DOWNLOADER_IMAGE="quay.io/metal3-io/ironic-ipa-downloader:master"
+  export IRONIC_DATA_DIR="${WORKING_DIR}/ironic"
+  export IRONIC_IMAGES_DIR="${IRONIC_DATA_DIR}/html/images"
+  OPENSHIFT_INSTALLER=/usr/local/bin/openshift-baremetal-install
+  OPENSHIFT_INSTALL_COMMIT=$($OPENSHIFT_INSTALLER version | grep commit | cut -d' ' -f4)
+  # Get the rhcos.json for that commit
+  OPENSHIFT_INSTALLER_MACHINE_OS=${OPENSHIFT_INSTALLER_MACHINE_OS:-https://raw.githubusercontent.com/openshift/installer/$OPENSHIFT_INSTALL_COMMIT/data/data/rhcos.json}
+
+  # Get the rhcos.json for that commit, and find the baseURI and openstack image path
+  MACHINE_OS_IMAGE_JSON=$(curl "${OPENSHIFT_INSTALLER_MACHINE_OS}")
+
+  export MACHINE_OS_INSTALLER_IMAGE_URL=$(echo "${MACHINE_OS_IMAGE_JSON}" | jq -r '.baseURI + .images.openstack.path')
+  export MACHINE_OS_INSTALLER_IMAGE_SHA256=$(echo "${MACHINE_OS_IMAGE_JSON}" | jq -r '.images.openstack.sha256')
+  export MACHINE_OS_IMAGE_URL=${MACHINE_OS_IMAGE_URL:-${MACHINE_OS_INSTALLER_IMAGE_URL}}
+  export MACHINE_OS_IMAGE_NAME=$(basename ${MACHINE_OS_IMAGE_URL})
+  export MACHINE_OS_IMAGE_SHA256=${MACHINE_OS_IMAGE_SHA256:-${MACHINE_OS_INSTALLER_IMAGE_SHA256}}
+
+  export MACHINE_OS_INSTALLER_BOOTSTRAP_IMAGE_URL=$(echo "${MACHINE_OS_IMAGE_JSON}" | jq -r '.baseURI + .images.qemu.path')
+  export MACHINE_OS_INSTALLER_BOOTSTRAP_IMAGE_SHA256=$(echo "${MACHINE_OS_IMAGE_JSON}" | jq -r '.images.qemu.sha256')
+  export MACHINE_OS_BOOTSTRAP_IMAGE_URL=${MACHINE_OS_BOOTSTRAP_IMAGE_URL:-${MACHINE_OS_INSTALLER_BOOTSTRAP_IMAGE_URL}}
+  export MACHINE_OS_BOOTSTRAP_IMAGE_NAME=$(basename ${MACHINE_OS_BOOTSTRAP_IMAGE_URL})
+  export MACHINE_OS_BOOTSTRAP_IMAGE_SHA256=${MACHINE_OS_BOOTSTRAP_IMAGE_SHA256:-${MACHINE_OS_INSTALLER_BOOTSTRAP_IMAGE_SHA256}}
+
+  # FIXME the installer cache expects an uncompressed sha256
+  # https://github.com/openshift/installer/issues/2845
+  export MACHINE_OS_INSTALLER_BOOTSTRAP_IMAGE_UNCOMPRESSED_SHA256=$(echo "${MACHINE_OS_IMAGE_JSON}" | jq -r '.images.qemu["uncompressed-sha256"]')
+  export MACHINE_OS_BOOTSTRAP_IMAGE_UNCOMPRESSED_SHA256=${MACHINE_OS_BOOTSTRAP_IMAGE_UNCOMPRESSED_SHA256:-${MACHINE_OS_INSTALLER_BOOTSTRAP_IMAGE_UNCOMPRESSED_SHA256}}
+
+  if [ ! -d "$IRONIC_IMAGES_DIR" ]; then
+    echo "Creating Ironic Images Dir"
+    sudo mkdir -p "$IRONIC_IMAGES_DIR"
+    sudo chown -R "${USER}:${USER}" "$IRONIC_DATA_DIR"
+    sudo find $IRONIC_DATA_DIR -type d -print0 | xargs -0 chmod 755
+    sudo chmod -R +r $IRONIC_DATA_DIR
+  fi
+
+
+  for name in ironic ironic-api ironic-conductor ironic-inspector dnsmasq httpd mariadb; do
+    sudo podman ps | grep -w "$name$" && sudo podman kill $name
+    sudo podman ps --all | grep -w "$name$" && sudo podman rm $name -f
+  done
+
+  sudo podman pod create -n ironic-pod 
+
+
+  CACHED_MACHINE_OS_IMAGE="${IRONIC_DATA_DIR}/html/images/${MACHINE_OS_IMAGE_NAME}"
+  if [ ! -f "${CACHED_MACHINE_OS_IMAGE}" ]; then
+    curl -g --insecure -L -o "${CACHED_MACHINE_OS_IMAGE}" "${MACHINE_OS_IMAGE_URL}"
+    echo "${MACHINE_OS_IMAGE_SHA256} ${CACHED_MACHINE_OS_IMAGE}" | tee ${CACHED_MACHINE_OS_IMAGE}.sha256sum
+    sha256sum --strict --check ${CACHED_MACHINE_OS_IMAGE}.sha256sum
+  fi
+
+  # cached images to the bootstrap VM
+  sudo podman run -d --net host --privileged --name httpd --pod ironic-pod \
+     -v $IRONIC_DATA_DIR:/shared --entrypoint /bin/runhttpd ${IRONIC_IMAGE}
+
+  sudo podman run -d --net host --privileged --name ipa-downloader --pod ironic-pod \
+     -v $IRONIC_DATA_DIR:/shared ${IRONIC_IPA_DOWNLOADER_IMAGE} /usr/local/bin/get-resource.sh
+
+  sudo podman wait -i 1000 ipa-downloader
+
+  while ! curl --fail http://localhost/images/${MACHINE_OS_IMAGE_NAME}.sha256sum ; do sleep 1 ; done
+  while ! curl --fail http://localhost/images/${MACHINE_OS_BOOTSTRAP_IMAGE_NAME}.sha256sum ; do sleep 1 ; done
+  while ! curl --fail --head http://localhost/images/ironic-python-agent.initramfs ; do sleep 1; done
+  while ! curl --fail --head http://localhost/images/ironic-python-agent.tar.headers ; do sleep 1; done
+  while ! curl --fail --head http://localhost/images/ironic-python-agent.kernel ; do sleep 1; done
+
+  sed -i -e '/baremetal:/a \ \ \ \ \ \ clusterOSImage: ${CACHE_URL}/${MACHINE_OS_IMAGE_NAME}?sha256=${MACHINE_OS_IMAGE_SHA256}'
+  sed -i -e '/baremetal:/a \ \ \ \ \ \ bootstrapOSImage: ${CACHE_URL}/${MACHINE_OS_BOOTSTRAP_IMAGE_NAME}?sha256=${MACHINE_OS_BOOTSTRAP_IMAGE_UNCOMPRESSED_SHA256}'
+}
+
 setup_env(){
   echo "Setting environment..."
   HOST_FQDN=`hostname -f`
@@ -177,7 +251,7 @@ setup_installconfig(){
   /usr/bin/ansible-playbook -i hosts make-install-config.yaml
   echo "pullSecret: '`cat $PULLSECRET`'" >> $INSTALLCONFIG
   echo "sshKey: '`cat $SSHKEY`'" >> $INSTALLCONFIG
-  mv ${INSTALLCONFIG} ${MANIFEST_DIR}/
+  cp ${INSTALLCONFIG} ${MANIFEST_DIR}/
 }
 
 existing_install_config(){
@@ -187,7 +261,7 @@ existing_install_config(){
       howto
       exit 1
     fi
-    mv ${INSTALLCONFIG} ${MANIFEST_DIR}/
+    cp ${INSTALLCONFIG} ${MANIFEST_DIR}/
   fi
 }
 
@@ -266,6 +340,7 @@ setup_bridges
 if ([ "$GENERATEINSTALLCONF" -eq "1" ]) then
   setup_installconfig
 fi
+prepare_cache
 if ([ "$ENABLEDISCONNECT" -eq "1" ]) then
   setup_repository
 fi
