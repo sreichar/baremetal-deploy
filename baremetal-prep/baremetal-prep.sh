@@ -160,6 +160,10 @@ prepare_cache(){
     sudo podman ps --all | grep -w "$name$" && sudo podman rm $name -f
   done
 
+  # Remove existing pod
+  if  sudo podman pod exists ironic-pod ; then 
+     sudo podman pod rm ironic-pod -f
+  fi
   sudo podman pod create -n ironic-pod 
 
 
